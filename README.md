@@ -144,20 +144,6 @@ frontend/
 └── public/             # Static assets
 ```
 
-### Running Tests
-
-Backend tests:
-```bash
-cd backend
-go test ./...
-```
-
-Frontend tests:
-```bash
-cd frontend
-npm test
-```
-
 ## Troubleshooting
 
 ### Port Already in Use
