@@ -17,4 +17,8 @@ type TransactionRepository interface {
 	GetTransactionsByDeviceID(deviceID int64) ([]models.Transaction, error)
 	GetTransactionByID(id int64) (*models.Transaction, error)
 	GetTransactionsWithFilter(filter TransactionFilter) ([]models.Transaction, int, error)
+
+	// Close releases any resources held by the repository (e.g., prepared statements)
+	// Optional method - implementations can return nil if no cleanup is needed
+	Close() error
 }

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	"github.com/mini-dms/backend/internal/database"
 	"github.com/mini-dms/backend/internal/models"
@@ -11,14 +12,63 @@ import (
 )
 
 // TransactionRepositoryImpl implements TransactionRepository with PostgreSQL
-type TransactionRepositoryImpl struct{}
+type TransactionRepositoryImpl struct {
+	// Prepared statement for creating transactions (concurrent-safe)
+	createStmt *sql.Stmt
+	stmtMutex  sync.RWMutex
+}
 
 // NewTransactionRepository creates a new transaction repository
 func NewTransactionRepository() TransactionRepository {
-	return &TransactionRepositoryImpl{}
+	repo := &TransactionRepositoryImpl{}
+
+	// Initialize prepared statement for concurrent writes
+	if err := repo.initPreparedStatements(); err != nil {
+		log.Error().Err(err).Msg("Failed to initialize prepared statements for transaction repository")
+		// Return repository anyway - will fall back to non-prepared queries
+	}
+
+	return repo
+}
+
+// initPreparedStatements prepares SQL statements for better concurrent performance
+func (r *TransactionRepositoryImpl) initPreparedStatements() error {
+	r.stmtMutex.Lock()
+	defer r.stmtMutex.Unlock()
+
+	// Prepare the CREATE transaction statement
+	query := `
+		INSERT INTO transactions (device_id, timestamp, username, event_type, payload, created_at)
+		VALUES ($1, $2, $3, $4, $5, NOW())
+		RETURNING id, created_at
+	`
+
+	stmt, err := database.DB.Prepare(query)
+	if err != nil {
+		return fmt.Errorf("failed to prepare create transaction statement: %w", err)
+	}
+
+	r.createStmt = stmt
+	log.Info().Msg("Transaction repository prepared statements initialized")
+	return nil
+}
+
+// Close closes prepared statements and releases resources
+func (r *TransactionRepositoryImpl) Close() error {
+	r.stmtMutex.Lock()
+	defer r.stmtMutex.Unlock()
+
+	if r.createStmt != nil {
+		if err := r.createStmt.Close(); err != nil {
+			return fmt.Errorf("failed to close create statement: %w", err)
+		}
+	}
+
+	return nil
 }
 
 // CreateTransaction inserts a new transaction into the database
+// Uses prepared statement for concurrent-safe, efficient writes
 func (r *TransactionRepositoryImpl) CreateTransaction(transaction *models.Transaction) error {
 	// Convert payload to JSONB
 	var payloadJSON []byte
@@ -30,20 +80,37 @@ func (r *TransactionRepositoryImpl) CreateTransaction(transaction *models.Transa
 		}
 	}
 
-	query := `
-		INSERT INTO transactions (device_id, timestamp, username, event_type, payload, created_at)
-		VALUES ($1, $2, $3, $4, $5, NOW())
-		RETURNING id, created_at
-	`
+	// Use prepared statement if available (concurrent-safe)
+	r.stmtMutex.RLock()
+	stmt := r.createStmt
+	r.stmtMutex.RUnlock()
 
-	err = database.DB.QueryRow(
-		query,
-		transaction.DeviceID,
-		transaction.Timestamp,
-		transaction.Username,
-		transaction.EventType,
-		payloadJSON,
-	).Scan(&transaction.ID, &transaction.CreatedAt)
+	if stmt != nil {
+		// Use prepared statement for better concurrent performance
+		err = stmt.QueryRow(
+			transaction.DeviceID,
+			transaction.Timestamp,
+			transaction.Username,
+			transaction.EventType,
+			payloadJSON,
+		).Scan(&transaction.ID, &transaction.CreatedAt)
+	} else {
+		// Fallback to direct query if prepared statement is not available
+		query := `
+			INSERT INTO transactions (device_id, timestamp, username, event_type, payload, created_at)
+			VALUES ($1, $2, $3, $4, $5, NOW())
+			RETURNING id, created_at
+		`
+
+		err = database.DB.QueryRow(
+			query,
+			transaction.DeviceID,
+			transaction.Timestamp,
+			transaction.Username,
+			transaction.EventType,
+			payloadJSON,
+		).Scan(&transaction.ID, &transaction.CreatedAt)
+	}
 
 	if err != nil {
 		log.Error().Err(err).Int64("device_id", transaction.DeviceID).Msg("Failed to create transaction")

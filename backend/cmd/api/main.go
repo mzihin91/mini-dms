@@ -42,6 +42,12 @@ func main() {
 	// Initialize repositories
 	deviceRepo := repository.NewDeviceRepository()
 	transactionRepo := repository.NewTransactionRepository()
+	// Ensure prepared statements are cleaned up on exit
+	defer func() {
+		if err := transactionRepo.Close(); err != nil {
+			log.Error().Err(err).Msg("Failed to close transaction repository")
+		}
+	}()
 
 	// Initialize device worker factory and manager
 	workerFactory := deviceworker.NewWorkerFactory(transactionRepo)
